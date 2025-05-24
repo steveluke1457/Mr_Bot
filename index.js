@@ -1,38 +1,32 @@
-require('dotenv').config();
 const { Client, GatewayIntentBits } = require('discord.js');
-const axios = require('axios');
+require('dotenv').config();
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] });
-
-client.on('ready', () => {
-  console.log(`Logged in as ${client.user.tag}`);
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+  ],
 });
 
-client.on('messageCreate', async (message) => {
+client.once('ready', () => {
+  console.log(`✅ Mr_Bot is online as ${client.user.tag}`);
+});
+
+client.on('messageCreate', (message) => {
   if (message.author.bot) return;
 
-  if (message.content.startsWith('/ai')) {
-    const prompt = message.content.replace('/ai', '').trim();
-    if (!prompt) return message.reply('Please enter a prompt.');
+  const content = message.content.toLowerCase();
 
-    try {
-      const response = await axios.post(
-        'https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.1',
-        { inputs: prompt },
-        {
-          headers: {
-            Authorization: `Bearer ${process.env.HUGGINGFACE_TOKEN}`,
-          },
-        }
-      );
+  const isMentioned = message.mentions.has(client.user);
+  const nameMentioned =
+    content.includes('mr_bot') ||
+    content.includes('mr bot') ||
+    content.includes('mrbot');
 
-      const output = response.data[0]?.generated_text || "No response.";
-      message.reply(output);
-    } catch (err) {
-      console.error(err);
-      message.reply("There was an error contacting Hugging Face.");
-    }
+  if (isMentioned || nameMentioned) {
+    message.reply("👋 You called Mr_Bot? I'm here to help!");
   }
 });
 
-client.login(process.env.DISCORD_TOKEN);
+client.login(process.env.TOKEN);
