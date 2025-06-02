@@ -1,46 +1,46 @@
-const { 
-  Client, 
-  GatewayIntentBits, 
-  Partials, 
-  ChannelType, 
-  PermissionsBitField, 
-  ActionRowBuilder, 
-  ButtonBuilder, 
-  ButtonStyle 
+const {
+  Client,
+  GatewayIntentBits,
+  Partials,
+  ChannelType,
+  PermissionsBitField,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
 } = require("discord.js");
 require("dotenv").config();
 const fetch = require("node-fetch");
 
+// Create the Discord client with proper intents and partials
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.MessageReactions,
   ],
-  partials: [Partials.Channel, Partials.Message, Partials.Reaction],
+  partials: [Partials.Channel],
 });
 
-// ======= CONFIGURATION =======
-const HELP_CHANNEL_ID = "YOUR_HELP_CHANNEL_ID"; // e.g. "123456789012345678"
-const TICKET_CATEGORY_ID = "YOUR_TICKET_CATEGORY_ID"; // e.g. "123456789012345678"
-const STAFF_ROLE_ID = "YOUR_STAFF_ROLE_ID"; // e.g. "123456789012345678"
-const TICKET_COOLDOWN_TIME = 10 * 1000; // 10 seconds cooldown on ticket creation
-const TICKET_TIMEOUT_DURATION = 10 * 60 * 1000; // 10 minutes timeout on spam
+// === CONFIG - REPLACE THESE WITH YOUR ACTUAL IDs ===
+const HELP_CHANNEL_ID = "1374671416439472148";
+const TICKET_CATEGORY_ID = " 1379112243177717842";
+const STAFF_ROLE_ID = "1374444076702634137";
 
-// For spam prevention cooldown and conversation tracking
+// Map to track user cooldown on ticket creation to prevent spam
 const ticketCooldown = new Map();
+
+// Map to keep conversation history for AI chat in tickets
 const conversationHistory = new Map();
 
 client.once("ready", async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 
-  // Ensure the ticket creation button is in the help channel
+  // Ensure the open ticket button exists in the help channel
   const helpChannel = await client.channels.fetch(HELP_CHANNEL_ID);
   const messages = await helpChannel.messages.fetch({ limit: 10 });
-  
-  // If no recent button message found, send it
-  if (!messages.some(m => m.components.length > 0)) {
+
+  // Only send the ticket button message if none exists yet
+  if (!messages.some((msg) => msg.author.id === client.user.id)) {
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId("create_ticket")
@@ -55,7 +55,6 @@ client.once("ready", async () => {
   }
 });
 
-// Interaction handling: create/close ticket buttons
 client.on("interactionCreate", async (interaction) => {
   if (!interaction.isButton()) return;
 
@@ -63,32 +62,30 @@ client.on("interactionCreate", async (interaction) => {
 
   if (customId === "create_ticket") {
     const now = Date.now();
-    const lastUsed = ticketCooldown.get(user.id);
+    const lastClick = ticketCooldown.get(user.id);
 
-    // Spam detection: user clicked within cooldown period
-    if (lastUsed && now - lastUsed < TICKET_COOLDOWN_TIME) {
-      // Delete all user's tickets (channels named ticket-username)
+    // Spam prevention: if clicked within 10 seconds
+    if (lastClick && now - lastClick < 10000) {
+      // Find all user tickets and delete them
       const userTickets = guild.channels.cache.filter(
         (c) => c.name === `ticket-${user.username.toLowerCase()}`
       );
-      for (const ch of userTickets.values()) {
-        try {
-          await ch.delete();
-        } catch {}
+      for (const channel of userTickets.values()) {
+        await channel.delete().catch(() => {});
       }
 
-      // Timeout user for spamming
+      // Timeout user 10 minutes
       try {
         const member = await guild.members.fetch(user.id);
-        await member.timeout(TICKET_TIMEOUT_DURATION, "Spamming ticket creation");
+        await member.timeout(10 * 60 * 1000, "Spamming ticket creation");
         await interaction.reply({
-          content: "⛔ You were spamming ticket creation and have been timed out for 10 minutes.",
+          content: "⛔ You were spamming tickets and have been timed out for 10 minutes.",
           ephemeral: true,
         });
       } catch (error) {
-        console.error("Failed to timeout user:", error);
+        console.error("Timeout failed:", error);
         await interaction.reply({
-          content: "❌ Please do not spam ticket creation.",
+          content: "❌ You are spamming tickets. Please wait before trying again.",
           ephemeral: true,
         });
       }
@@ -108,11 +105,11 @@ client.on("interactionCreate", async (interaction) => {
       });
     }
 
-    // Create ticket channel
+    // Create a new ticket channel
     const ticketChannel = await guild.channels.create({
       name: `ticket-${user.username}`.toLowerCase(),
       type: ChannelType.GuildText,
-      parent: TICKET_CATEGORY_ID || null,
+      parent: TICKET_CATEGORY_ID,
       permissionOverwrites: [
         {
           id: guild.roles.everyone,
@@ -127,7 +124,7 @@ client.on("interactionCreate", async (interaction) => {
           ],
         },
         {
-          id: STAFF_ROLE_ID,
+          id: client.user.id,
           allow: [
             PermissionsBitField.Flags.ViewChannel,
             PermissionsBitField.Flags.SendMessages,
@@ -135,7 +132,7 @@ client.on("interactionCreate", async (interaction) => {
           ],
         },
         {
-          id: client.user.id,
+          id: STAFF_ROLE_ID,
           allow: [
             PermissionsBitField.Flags.ViewChannel,
             PermissionsBitField.Flags.SendMessages,
@@ -153,7 +150,7 @@ client.on("interactionCreate", async (interaction) => {
     );
 
     await ticketChannel.send({
-      content: `🎫 Hello <@${user.id}>, your support ticket has been opened. How can I assist you today?`,
+      content: `🎫 <@${user.id}>, your ticket is now open! How can we assist you today?`,
       components: [closeRow],
     });
 
@@ -161,10 +158,6 @@ client.on("interactionCreate", async (interaction) => {
   }
 
   if (customId === "close_ticket") {
-    if (!interaction.channel.name.startsWith("ticket-")) {
-      return interaction.reply({ content: "This button can only be used inside ticket channels.", ephemeral: true });
-    }
-
     await interaction.reply("🕐 Closing this ticket in 5 seconds...");
     setTimeout(() => {
       interaction.channel.delete().catch(console.error);
@@ -172,42 +165,41 @@ client.on("interactionCreate", async (interaction) => {
   }
 });
 
-// Listen to messages inside ticket channels for AI chat
 client.on("messageCreate", async (message) => {
-  if (message.author.bot || !message.guild) return;
+  if (
+    message.author.bot ||
+    !message.guild ||
+    !message.channel.name.startsWith("ticket-")
+  )
+    return;
 
-  if (!message.channel.name.startsWith("ticket-")) return;
-
+  // Track conversation history (limit last 6 messages per user)
   const userId = message.author.id;
-  const pastMessages = conversationHistory.get(userId)?.history || [];
+  const history = conversationHistory.get(userId)?.history || [];
 
-  // Add user message to history
-  pastMessages.push({ role: "user", content: message.content });
+  history.push({ role: "user", content: message.content });
 
-  // Call AI API (Groq example)
-  const aiReply = await fetchFromGroq(pastMessages);
+  // Call AI (Groq) API
+  const reply = await fetchFromGroq(history);
 
-  if (!aiReply) return;
+  if (!reply) return;
 
-  pastMessages.push({ role: "assistant", content: aiReply });
-
-  // Keep last 6 messages max
+  history.push({ role: "assistant", content: reply });
   conversationHistory.set(userId, {
-    history: pastMessages.slice(-6),
+    history: history.slice(-6),
     timestamp: Date.now(),
   });
 
-  // Send reply in chunks if too long
-  const chunks = splitMessage(aiReply);
-  for (const chunk of chunks) {
+  // Send reply chunked to stay within Discord limits
+  for (const chunk of splitMessage(reply)) {
     await message.channel.send(chunk);
   }
 });
 
-// --- AI chat using Groq API ---
+// Fetch AI response from Groq API
 async function fetchFromGroq(messages) {
   try {
-    const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
@@ -218,16 +210,15 @@ async function fetchFromGroq(messages) {
         messages,
       }),
     });
-
-    const data = await res.json();
+    const data = await response.json();
     return data.choices?.[0]?.message?.content.trim();
-  } catch (error) {
-    console.error("Groq API error:", error);
-    return "⚠️ Sorry, I'm having trouble responding right now.";
+  } catch (err) {
+    console.error("Groq API error:", err);
+    return "⚠️ Sorry, I am currently unable to respond.";
   }
 }
 
-// Split messages > 2000 chars into smaller chunks to avoid Discord limits
+// Split long messages into 2000-char chunks for Discord
 function splitMessage(text, maxLength = 2000) {
   const chunks = [];
   let current = "";
@@ -237,10 +228,10 @@ function splitMessage(text, maxLength = 2000) {
       chunks.push(current);
       current = line;
     } else {
-      current += "\n" + line;
+      current += (current ? "\n" : "") + line;
     }
   }
-  if (current) chunks.push(current.trim());
+  if (current) chunks.push(current);
   return chunks;
 }
 
