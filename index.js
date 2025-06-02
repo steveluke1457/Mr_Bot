@@ -18,9 +18,9 @@ client.on("messageCreate", async (message) => {
   const content = message.content.toLowerCase();
   const triggered = content.includes("mr_bot") || content.includes("mr bot") || content.includes("mrbot");
 
-  // Only reply if it's a fresh mention or part of an ongoing conversation
   const userId = message.author.id;
-  const isOngoing = conversationHistory.has(userId) && Date.now() - conversationHistory.get(userId).timestamp < 3 * 60 * 1000;
+  const isOngoing = conversationHistory.has(userId) &&
+    Date.now() - conversationHistory.get(userId).timestamp < 3 * 60 * 1000;
 
   if (triggered || isOngoing) {
     await message.channel.sendTyping();
@@ -33,13 +33,17 @@ client.on("messageCreate", async (message) => {
 
     pastMessages.push({ role: "assistant", content: reply });
 
-    // Update conversation history
+    // Update conversation memory (limit to last 6 exchanges)
     conversationHistory.set(userId, {
-      history: pastMessages.slice(-6), // keep only recent 6 messages
+      history: pastMessages.slice(-6),
       timestamp: Date.now(),
     });
 
-    message.reply(reply);
+    // Send in 2000-char chunks
+    const chunks = splitMessage(reply);
+    for (const chunk of chunks) {
+      await message.reply(chunk);
+    }
   }
 });
 
@@ -63,6 +67,23 @@ async function fetchFromGroq(messages) {
     console.error("Groq API error:", err);
     return "⚠️ Sorry, I had trouble thinking just now.";
   }
+}
+
+function splitMessage(text, maxLength = 2000) {
+  const chunks = [];
+  let current = "";
+
+  for (const line of text.split("\n")) {
+    if ((current + "\n" + line).length > maxLength) {
+      chunks.push(current);
+      current = line;
+    } else {
+      current += "\n" + line;
+    }
+  }
+
+  if (current) chunks.push(current.trim());
+  return chunks;
 }
 
 client.login(process.env.DISCORD_BOT_TOKEN);
