@@ -10,20 +10,21 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.MessageReactions,
+    GatewayIntentBits.MessageReactionAdd,
+    GatewayIntentBits.MessageReactionRemove,
   ],
   partials: [Partials.Channel],
 });
 
-// Config - Replace these with your IDs
-const HELP_CHANNEL_ID = "1374671416439472148";       // channel with the open ticket button
-const TICKET_CATEGORY_ID = "1379112243177717842"; // category where tickets get created
-const STAFF_ROLE_ID = "1374444076702634137";
+// Config - Replace these with your actual IDs or set in .env
+const HELP_CHANNEL_ID = process.env.HELP_CHANNEL_ID || "1374671416439472148";       
+const TICKET_CATEGORY_ID = process.env.TICKET_CATEGORY_ID || "1379112243177717842";
+const STAFF_ROLE_ID = process.env.STAFF_ROLE_ID || "1374444076702634137";
 
-// Cooldown map to detect ticket spamming
+// Map to prevent ticket spam
 const ticketCooldown = new Map();
 
-// For tracking conversation history per user in tickets (for AI chat)
+// Store conversation history per user (max 6 messages) for AI context
 const conversationHistory = new Map();
 
 client.once("ready", async () => {
@@ -96,7 +97,7 @@ client.on("interactionCreate", async (interaction) => {
       });
     }
 
-    // Create ticket channel
+    // Create ticket channel with proper permissions
     const ticketChannel = await guild.channels.create({
       name: `ticket-${user.username}`.toLowerCase(),
       type: ChannelType.GuildText,
