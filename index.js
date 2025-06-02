@@ -1,46 +1,40 @@
-const {
-  Client,
-  GatewayIntentBits,
-  Partials,
-  ChannelType,
-  PermissionsBitField,
-  ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
+const { 
+  Client, GatewayIntentBits, Partials, ChannelType, PermissionsBitField, 
+  ActionRowBuilder, ButtonBuilder, ButtonStyle 
 } = require("discord.js");
 require("dotenv").config();
 const fetch = require("node-fetch");
 
-// Create the Discord client with proper intents and partials
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
+    GatewayIntentBits.MessageReactions,
   ],
   partials: [Partials.Channel],
 });
 
-// === CONFIG - REPLACE THESE WITH YOUR ACTUAL IDs ===
+// IDs
 const HELP_CHANNEL_ID = "1374671416439472148";
-const TICKET_CATEGORY_ID = " 1379112243177717842";
+const TICKET_CATEGORY_ID = "1379112243177717842";
 const STAFF_ROLE_ID = "1374444076702634137";
+const COUNTING_CHANNEL_ID = "1375514672433991680";
 
-// Map to track user cooldown on ticket creation to prevent spam
+// Cooldown map for ticket spam detection
 const ticketCooldown = new Map();
-
-// Map to keep conversation history for AI chat in tickets
+// Conversation history per user (for AI chat)
 const conversationHistory = new Map();
+// Counting state per channel (for counting channel only)
+const countingState = new Map();
 
 client.once("ready", async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 
-  // Ensure the open ticket button exists in the help channel
+  // Send the ticket button if not exists in HELP_CHANNEL_ID
   const helpChannel = await client.channels.fetch(HELP_CHANNEL_ID);
-  const messages = await helpChannel.messages.fetch({ limit: 10 });
-
-  // Only send the ticket button message if none exists yet
-  if (!messages.some((msg) => msg.author.id === client.user.id)) {
+  const existingMessages = await helpChannel.messages.fetch({ limit: 10 });
+  if (existingMessages.size === 0) {
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId("create_ticket")
@@ -64,52 +58,52 @@ client.on("interactionCreate", async (interaction) => {
     const now = Date.now();
     const lastClick = ticketCooldown.get(user.id);
 
-    // Spam prevention: if clicked within 10 seconds
-    if (lastClick && now - lastClick < 10000) {
-      // Find all user tickets and delete them
-      const userTickets = guild.channels.cache.filter(
-        (c) => c.name === `ticket-${user.username.toLowerCase()}`
+    // Spam detection: multiple clicks within 10 seconds
+    if (lastClick && now - lastClick < 10_000) {
+      // Delete all user's tickets
+      const userTickets = guild.channels.cache.filter(c =>
+        c.name === `ticket-${user.username.toLowerCase()}`
       );
-      for (const channel of userTickets.values()) {
-        await channel.delete().catch(() => {});
-      }
+      userTickets.forEach(channel => channel.delete().catch(() => {}));
 
       // Timeout user 10 minutes
       try {
         const member = await guild.members.fetch(user.id);
-        await member.timeout(10 * 60 * 1000, "Spamming ticket creation");
+        await member.timeout(10 * 60 * 1000, "Spamming ticket system");
         await interaction.reply({
           content: "⛔ You were spamming tickets and have been timed out for 10 minutes.",
           ephemeral: true,
         });
-      } catch (error) {
-        console.error("Timeout failed:", error);
+      } catch (err) {
+        console.error("Timeout failed:", err);
         await interaction.reply({
           content: "❌ You are spamming tickets. Please wait before trying again.",
           ephemeral: true,
         });
       }
+
+      console.log(`[⚠️] ${user.tag} timed out for ticket spam.`);
       return;
     }
 
     ticketCooldown.set(user.id, now);
 
-    // Check if user already has an open ticket
-    const existingTicket = guild.channels.cache.find(
-      (c) => c.name === `ticket-${user.username.toLowerCase()}`
+    // Check if user already has a ticket
+    const existing = guild.channels.cache.find(c =>
+      c.name === `ticket-${user.username.toLowerCase()}`
     );
-    if (existingTicket) {
+    if (existing) {
       return interaction.reply({
         content: "📬 You already have an open ticket.",
         ephemeral: true,
       });
     }
 
-    // Create a new ticket channel
+    // Create ticket channel
     const ticketChannel = await guild.channels.create({
       name: `ticket-${user.username}`.toLowerCase(),
       type: ChannelType.GuildText,
-      parent: TICKET_CATEGORY_ID,
+      parent: TICKET_CATEGORY_ID || null,
       permissionOverwrites: [
         {
           id: guild.roles.everyone,
@@ -117,27 +111,15 @@ client.on("interactionCreate", async (interaction) => {
         },
         {
           id: user.id,
-          allow: [
-            PermissionsBitField.Flags.ViewChannel,
-            PermissionsBitField.Flags.SendMessages,
-            PermissionsBitField.Flags.ReadMessageHistory,
-          ],
+          allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages],
         },
         {
           id: client.user.id,
-          allow: [
-            PermissionsBitField.Flags.ViewChannel,
-            PermissionsBitField.Flags.SendMessages,
-            PermissionsBitField.Flags.ReadMessageHistory,
-          ],
+          allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages],
         },
         {
           id: STAFF_ROLE_ID,
-          allow: [
-            PermissionsBitField.Flags.ViewChannel,
-            PermissionsBitField.Flags.SendMessages,
-            PermissionsBitField.Flags.ReadMessageHistory,
-          ],
+          allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages],
         },
       ],
     });
@@ -150,7 +132,7 @@ client.on("interactionCreate", async (interaction) => {
     );
 
     await ticketChannel.send({
-      content: `🎫 <@${user.id}>, your ticket is now open! How can we assist you today?`,
+      content: `🎫 <@${user.id}>, your support ticket has been opened. How can I assist you?`,
       components: [closeRow],
     });
 
@@ -158,48 +140,77 @@ client.on("interactionCreate", async (interaction) => {
   }
 
   if (customId === "close_ticket") {
+    const channel = interaction.channel;
     await interaction.reply("🕐 Closing this ticket in 5 seconds...");
     setTimeout(() => {
-      interaction.channel.delete().catch(console.error);
+      channel.delete().catch(console.error);
     }, 5000);
   }
 });
 
 client.on("messageCreate", async (message) => {
-  if (
-    message.author.bot ||
-    !message.guild ||
-    !message.channel.name.startsWith("ticket-")
-  )
-    return;
+  if (message.author.bot || !message.guild) return;
 
-  // Track conversation history (limit last 6 messages per user)
+  // COUNTING LOGIC: Only in counting channel
+  if (message.channel.id === COUNTING_CHANNEL_ID) {
+    const channelId = message.channel.id;
+    const lastState = countingState.get(channelId) || { lastNum: 0, lastUser: null };
+
+    const msgNum = parseInt(message.content.trim());
+    if (!isNaN(msgNum)) {
+      if (msgNum === lastState.lastNum + 1) {
+        if (message.author.id === lastState.lastUser) {
+          // Same user counting twice in a row: delete message
+          await message.delete().catch(() => {});
+          return;
+        } else {
+          // Different user - valid count
+          await message.react("✅").catch(() => {});
+          countingState.set(channelId, { lastNum: msgNum, lastUser: message.author.id });
+          return;
+        }
+      } else if (msgNum === 1) {
+        // Reset counting
+        await message.react("✅").catch(() => {});
+        countingState.set(channelId, { lastNum: 1, lastUser: message.author.id });
+        return;
+      }
+      // Number out of sequence - ignore without reaction or deleting
+      return;
+    }
+  }
+
+  // AI chat and ticket system only inside ticket channels (names start with ticket-)
+  if (!message.channel.name.startsWith("ticket-")) return;
+
+  // AI conversation history per user
   const userId = message.author.id;
-  const history = conversationHistory.get(userId)?.history || [];
+  const pastMessages = conversationHistory.get(userId)?.history || [];
 
-  history.push({ role: "user", content: message.content });
+  pastMessages.push({ role: "user", content: message.content });
 
-  // Call AI (Groq) API
-  const reply = await fetchFromGroq(history);
-
+  // Fetch AI response
+  const reply = await fetchFromGroq(pastMessages);
   if (!reply) return;
 
-  history.push({ role: "assistant", content: reply });
+  pastMessages.push({ role: "assistant", content: reply });
+
   conversationHistory.set(userId, {
-    history: history.slice(-6),
+    history: pastMessages.slice(-6),
     timestamp: Date.now(),
   });
 
-  // Send reply chunked to stay within Discord limits
-  for (const chunk of splitMessage(reply)) {
+  // Send reply in chunks if too long for Discord (max 2000 chars)
+  const chunks = splitMessage(reply);
+  for (const chunk of chunks) {
     await message.channel.send(chunk);
   }
 });
 
-// Fetch AI response from Groq API
+// Groq AI chat API call
 async function fetchFromGroq(messages) {
   try {
-    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
@@ -210,15 +221,16 @@ async function fetchFromGroq(messages) {
         messages,
       }),
     });
-    const data = await response.json();
+
+    const data = await res.json();
     return data.choices?.[0]?.message?.content.trim();
   } catch (err) {
     console.error("Groq API error:", err);
-    return "⚠️ Sorry, I am currently unable to respond.";
+    return "⚠️ Sorry, I'm having trouble responding right now.";
   }
 }
 
-// Split long messages into 2000-char chunks for Discord
+// Split long messages into smaller chunks (max 2000 chars)
 function splitMessage(text, maxLength = 2000) {
   const chunks = [];
   let current = "";
@@ -228,10 +240,10 @@ function splitMessage(text, maxLength = 2000) {
       chunks.push(current);
       current = line;
     } else {
-      current += (current ? "\n" : "") + line;
+      current += "\n" + line;
     }
   }
-  if (current) chunks.push(current);
+  if (current) chunks.push(current.trim());
   return chunks;
 }
 
