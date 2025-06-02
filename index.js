@@ -5,6 +5,7 @@ const {
 require("dotenv").config();
 const fetch = require("node-fetch");
 
+// Create Discord client with proper intents and partials
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -12,133 +13,157 @@ const client = new Client({
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.MessageReactions,
   ],
-  partials: [Partials.Channel],
+  partials: [Partials.Message, Partials.Channel, Partials.Reaction],
 });
 
-// IDs
-const HELP_CHANNEL_ID = "1374671416439472148";
-const TICKET_CATEGORY_ID = "1379112243177717842";
-const STAFF_ROLE_ID = "1374444076702634137";
-const COUNTING_CHANNEL_ID = "1375514672433991680";
+// === IDs - Replace these with your actual IDs ===
+const HELP_CHANNEL_ID = "1374671416439472148";     // Help channel where ticket button is posted
+const TICKET_CATEGORY_ID = "1379112243177717842";  // Category under which tickets are created
+const STAFF_ROLE_ID = "1374444076702634137";       // Role allowed to see tickets
+const COUNTING_CHANNEL_ID = "1375514672433991680"; // Counting channel
 
-// Cooldown map for ticket spam detection
+// Cooldown to prevent ticket spam
 const ticketCooldown = new Map();
-// Conversation history per user (for AI chat)
+
+// Conversation history per user for AI replies in tickets
 const conversationHistory = new Map();
-// Counting state per channel (for counting channel only)
+
+// Counting state: track last number and user per channel (just one channel here)
 const countingState = new Map();
 
+// When bot is ready
 client.once("ready", async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 
-  // Send the ticket button if not exists in HELP_CHANNEL_ID
-  const helpChannel = await client.channels.fetch(HELP_CHANNEL_ID);
-  const existingMessages = await helpChannel.messages.fetch({ limit: 10 });
-  if (existingMessages.size === 0) {
-    const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId("create_ticket")
-        .setLabel("🎫 Open Ticket")
-        .setStyle(ButtonStyle.Primary)
+  try {
+    const helpChannel = await client.channels.fetch(HELP_CHANNEL_ID);
+
+    // Check if the ticket button message already exists to avoid duplicates
+    const fetchedMessages = await helpChannel.messages.fetch({ limit: 10 });
+    const buttonMessageExists = fetchedMessages.some(msg =>
+      msg.components.length > 0 && 
+      msg.components[0].components.some(c => c.customId === "create_ticket")
     );
 
-    await helpChannel.send({
-      content: "**Need help?** Click the button below to create a private support ticket.",
-      components: [row],
-    });
+    if (!buttonMessageExists) {
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId("create_ticket")
+          .setLabel("🎫 Open Ticket")
+          .setStyle(ButtonStyle.Primary)
+      );
+
+      await helpChannel.send({
+        content: "**Need help?** Click the button below to create a private support ticket.",
+        components: [row],
+      });
+      console.log("🎫 Ticket button posted in help channel.");
+    }
+  } catch (error) {
+    console.error("Error fetching help channel or sending button:", error);
   }
 });
 
+// Button interactions handler
 client.on("interactionCreate", async (interaction) => {
   if (!interaction.isButton()) return;
 
   const { customId, user, guild } = interaction;
 
+  // Create ticket button pressed
   if (customId === "create_ticket") {
     const now = Date.now();
     const lastClick = ticketCooldown.get(user.id);
 
-    // Spam detection: multiple clicks within 10 seconds
+    // Prevent spam: only one ticket every 10 seconds
     if (lastClick && now - lastClick < 10_000) {
-      // Delete all user's tickets
+      // Delete any existing tickets from user and timeout for 10 minutes
       const userTickets = guild.channels.cache.filter(c =>
         c.name === `ticket-${user.username.toLowerCase()}`
       );
       userTickets.forEach(channel => channel.delete().catch(() => {}));
 
-      // Timeout user 10 minutes
       try {
         const member = await guild.members.fetch(user.id);
         await member.timeout(10 * 60 * 1000, "Spamming ticket system");
+
         await interaction.reply({
           content: "⛔ You were spamming tickets and have been timed out for 10 minutes.",
           ephemeral: true,
         });
-      } catch (err) {
-        console.error("Timeout failed:", err);
+      } catch {
         await interaction.reply({
           content: "❌ You are spamming tickets. Please wait before trying again.",
           ephemeral: true,
         });
       }
-
       console.log(`[⚠️] ${user.tag} timed out for ticket spam.`);
       return;
     }
 
     ticketCooldown.set(user.id, now);
 
-    // Check if user already has a ticket
-    const existing = guild.channels.cache.find(c =>
-      c.name === `ticket-${user.username.toLowerCase()}`
+    // Check if user already has an open ticket
+    const existingTicket = guild.channels.cache.find(
+      c => c.name === `ticket-${user.username.toLowerCase()}`
     );
-    if (existing) {
+    if (existingTicket) {
       return interaction.reply({
         content: "📬 You already have an open ticket.",
         ephemeral: true,
       });
     }
 
-    // Create ticket channel
-    const ticketChannel = await guild.channels.create({
-      name: `ticket-${user.username}`.toLowerCase(),
-      type: ChannelType.GuildText,
-      parent: TICKET_CATEGORY_ID || null,
-      permissionOverwrites: [
-        {
-          id: guild.roles.everyone,
-          deny: [PermissionsBitField.Flags.ViewChannel],
-        },
-        {
-          id: user.id,
-          allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages],
-        },
-        {
-          id: client.user.id,
-          allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages],
-        },
-        {
-          id: STAFF_ROLE_ID,
-          allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages],
-        },
-      ],
-    });
+    // Create new ticket channel
+    try {
+      const ticketChannel = await guild.channels.create({
+        name: `ticket-${user.username}`.toLowerCase(),
+        type: ChannelType.GuildText,
+        parent: TICKET_CATEGORY_ID || null,
+        permissionOverwrites: [
+          {
+            id: guild.roles.everyone,
+            deny: [PermissionsBitField.Flags.ViewChannel],
+          },
+          {
+            id: user.id,
+            allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages],
+          },
+          {
+            id: client.user.id,
+            allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages],
+          },
+          {
+            id: STAFF_ROLE_ID,
+            allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages],
+          },
+        ],
+      });
 
-    const closeRow = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId("close_ticket")
-        .setLabel("🔒 Close Ticket")
-        .setStyle(ButtonStyle.Danger)
-    );
+      // Send close ticket button
+      const closeRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId("close_ticket")
+          .setLabel("🔒 Close Ticket")
+          .setStyle(ButtonStyle.Danger)
+      );
 
-    await ticketChannel.send({
-      content: `🎫 <@${user.id}>, your support ticket has been opened. How can I assist you?`,
-      components: [closeRow],
-    });
+      await ticketChannel.send({
+        content: `🎫 <@${user.id}>, your support ticket has been opened. How can I assist you?`,
+        components: [closeRow],
+      });
 
-    await interaction.reply({ content: "✅ Your ticket has been created.", ephemeral: true });
+      await interaction.reply({ content: "✅ Your ticket has been created.", ephemeral: true });
+    } catch (error) {
+      console.error("Error creating ticket channel:", error);
+      await interaction.reply({
+        content: "❌ Failed to create ticket channel. Please contact a staff member.",
+        ephemeral: true,
+      });
+    }
   }
 
+  // Close ticket button pressed
   if (customId === "close_ticket") {
     const channel = interaction.channel;
     await interaction.reply("🕐 Closing this ticket in 5 seconds...");
@@ -148,10 +173,11 @@ client.on("interactionCreate", async (interaction) => {
   }
 });
 
+// Message handler for counting and AI chat in tickets
 client.on("messageCreate", async (message) => {
   if (message.author.bot || !message.guild) return;
 
-  // COUNTING LOGIC: Only in counting channel
+  // === Counting channel logic ===
   if (message.channel.id === COUNTING_CHANNEL_ID) {
     const channelId = message.channel.id;
     const lastState = countingState.get(channelId) || { lastNum: 0, lastUser: null };
@@ -160,54 +186,54 @@ client.on("messageCreate", async (message) => {
     if (!isNaN(msgNum)) {
       if (msgNum === lastState.lastNum + 1) {
         if (message.author.id === lastState.lastUser) {
-          // Same user counting twice in a row: delete message
+          // Same user trying to count twice in a row: delete message
           await message.delete().catch(() => {});
           return;
         } else {
-          // Different user - valid count
+          // Valid count, add reaction and update state
           await message.react("✅").catch(() => {});
           countingState.set(channelId, { lastNum: msgNum, lastUser: message.author.id });
           return;
         }
       } else if (msgNum === 1) {
-        // Reset counting
+        // Reset count to 1 (allowed anytime)
         await message.react("✅").catch(() => {});
         countingState.set(channelId, { lastNum: 1, lastUser: message.author.id });
         return;
       }
-      // Number out of sequence - ignore without reaction or deleting
+      // Invalid count number, no reaction, no deletion
       return;
     }
   }
 
-  // AI chat and ticket system only inside ticket channels (names start with ticket-)
+  // === AI chat inside ticket channels only ===
   if (!message.channel.name.startsWith("ticket-")) return;
 
-  // AI conversation history per user
   const userId = message.author.id;
-  const pastMessages = conversationHistory.get(userId)?.history || [];
+  let pastMessages = conversationHistory.get(userId)?.history || [];
 
+  // Add user message to history
   pastMessages.push({ role: "user", content: message.content });
 
-  // Fetch AI response
+  // Fetch AI reply
   const reply = await fetchFromGroq(pastMessages);
   if (!reply) return;
 
+  // Add AI reply to history (limit last 6 messages)
   pastMessages.push({ role: "assistant", content: reply });
-
   conversationHistory.set(userId, {
     history: pastMessages.slice(-6),
     timestamp: Date.now(),
   });
 
-  // Send reply in chunks if too long for Discord (max 2000 chars)
+  // Send AI reply (split into chunks if too long)
   const chunks = splitMessage(reply);
   for (const chunk of chunks) {
     await message.channel.send(chunk);
   }
 });
 
-// Groq AI chat API call
+// Fetch AI response from Groq API
 async function fetchFromGroq(messages) {
   try {
     const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
@@ -230,7 +256,7 @@ async function fetchFromGroq(messages) {
   }
 }
 
-// Split long messages into smaller chunks (max 2000 chars)
+// Helper: split long messages to Discord message limit (2000 chars)
 function splitMessage(text, maxLength = 2000) {
   const chunks = [];
   let current = "";
@@ -240,11 +266,12 @@ function splitMessage(text, maxLength = 2000) {
       chunks.push(current);
       current = line;
     } else {
-      current += "\n" + line;
+      current += (current.length ? "\n" : "") + line;
     }
   }
   if (current) chunks.push(current.trim());
   return chunks;
 }
 
+// Login bot
 client.login(process.env.DISCORD_BOT_TOKEN);
