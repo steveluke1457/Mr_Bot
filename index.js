@@ -1,3 +1,5 @@
+// Improved Discord Ticket Bot with Anti-Spam, AI, Confirmations, and Auto-Close Support
+
 const {
   Client,
   GatewayIntentBits,
@@ -7,11 +9,11 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  InteractionType,
 } = require("discord.js");
 require("dotenv").config();
 const fetch = require("node-fetch");
 
-// Create the Discord client with proper intents and partials
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -21,132 +23,93 @@ const client = new Client({
   partials: [Partials.Channel],
 });
 
-// === CONFIG - REPLACE THESE WITH YOUR ACTUAL IDs ===
 const HELP_CHANNEL_ID = "1374671416439472148";
 const TICKET_CATEGORY_ID = "1379112243177717842";
 const STAFF_ROLE_ID = "1374444076702634137";
 
-// Map to track user cooldown on ticket creation to prevent spam
 const ticketCooldown = new Map();
-
-// Map to keep conversation history for AI chat in tickets
 const conversationHistory = new Map();
+const ticketActivity = new Map();
 
 client.once("ready", async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 
-  // Ensure the open ticket button exists in the help channel
-  const helpChannel = await client.channels.fetch(HELP_CHANNEL_ID);
-  const messages = await helpChannel.messages.fetch({ limit: 10 });
+  try {
+    const helpChannel = await client.channels.fetch(HELP_CHANNEL_ID);
+    const messages = await helpChannel.messages.fetch({ limit: 10 });
+    if (!messages.some((msg) => msg.author.id === client.user.id)) {
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId("create_ticket")
+          .setLabel("🎫 Open Ticket")
+          .setStyle(ButtonStyle.Primary)
+      );
 
-  // Only send the ticket button message if none exists yet
-  if (!messages.some((msg) => msg.author.id === client.user.id)) {
-    const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId("create_ticket")
-        .setLabel("🎫 Open Ticket")
-        .setStyle(ButtonStyle.Primary)
-    );
-
-    await helpChannel.send({
-      content: "**Need help?** Click the button below to create a private support ticket.",
-      components: [row],
-    });
+      await helpChannel.send({
+        content: "**Need help?** Click the button below to create a private support ticket.",
+        components: [row],
+      });
+    }
+  } catch (err) {
+    console.error("Error setting up help channel:", err);
   }
 });
 
 client.on("interactionCreate", async (interaction) => {
-  if (!interaction.isButton()) return;
+  if (interaction.type !== InteractionType.MessageComponent) return;
 
   const { customId, user, guild } = interaction;
 
   if (customId === "create_ticket") {
     const now = Date.now();
     const lastClick = ticketCooldown.get(user.id);
-
-    // Spam prevention: if clicked within 10 seconds
     if (lastClick && now - lastClick < 10000) {
-      // Find all user tickets and delete them
-      const userTickets = guild.channels.cache.filter(
-        (c) => c.name === `ticket-${user.username.toLowerCase()}`
-      );
+      const userTickets = guild.channels.cache.filter((c) => c.name.includes(user.id));
       for (const channel of userTickets.values()) {
         await channel.delete().catch(() => {});
       }
-
-      // Timeout user 10 minutes
       try {
         const member = await guild.members.fetch(user.id);
         await member.timeout(10 * 60 * 1000, "Spamming ticket creation");
-        await interaction.reply({
+        return interaction.reply({
           content: "⛔ You were spamming tickets and have been timed out for 10 minutes.",
           ephemeral: true,
         });
-      } catch (error) {
-        console.error("Timeout failed:", error);
-        await interaction.reply({
+      } catch (err) {
+        console.error("Timeout failed:", err);
+        return interaction.reply({
           content: "❌ You are spamming tickets. Please wait before trying again.",
           ephemeral: true,
         });
       }
-      return;
     }
 
     ticketCooldown.set(user.id, now);
 
-    // Check if user already has an open ticket
-    const existingTicket = guild.channels.cache.find(
-      (c) => c.name === `ticket-${user.username.toLowerCase()}`
-    );
+    const existingTicket = guild.channels.cache.find((c) => c.name.includes(user.id));
     if (existingTicket) {
-      return interaction.reply({
-        content: "📬 You already have an open ticket.",
-        ephemeral: true,
-      });
+      return interaction.reply({ content: "📬 You already have an open ticket.", ephemeral: true });
     }
 
-    // Create a new ticket channel
     const ticketChannel = await guild.channels.create({
-      name: `ticket-${user.username}`.toLowerCase(),
+      name: `ticket-${user.username.toLowerCase()}-${user.id}`,
       type: ChannelType.GuildText,
       parent: TICKET_CATEGORY_ID,
       permissionOverwrites: [
-        {
-          id: guild.roles.everyone,
-          deny: [PermissionsBitField.Flags.ViewChannel],
-        },
-        {
-          id: user.id,
-          allow: [
-            PermissionsBitField.Flags.ViewChannel,
-            PermissionsBitField.Flags.SendMessages,
-            PermissionsBitField.Flags.ReadMessageHistory,
-          ],
-        },
-        {
-          id: client.user.id,
-          allow: [
-            PermissionsBitField.Flags.ViewChannel,
-            PermissionsBitField.Flags.SendMessages,
-            PermissionsBitField.Flags.ReadMessageHistory,
-          ],
-        },
-        {
-          id: STAFF_ROLE_ID,
-          allow: [
-            PermissionsBitField.Flags.ViewChannel,
-            PermissionsBitField.Flags.SendMessages,
-            PermissionsBitField.Flags.ReadMessageHistory,
-          ],
-        },
+        { id: guild.roles.everyone, deny: [PermissionsBitField.Flags.ViewChannel] },
+        { id: user.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory] },
+        { id: client.user.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory] },
+        { id: STAFF_ROLE_ID, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory] },
       ],
     });
 
+    const confirmRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId("confirm_close").setLabel("✅ Confirm").setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId("cancel_close").setLabel("❌ Cancel").setStyle(ButtonStyle.Secondary)
+    );
+
     const closeRow = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId("close_ticket")
-        .setLabel("🔒 Close Ticket")
-        .setStyle(ButtonStyle.Danger)
+      new ButtonBuilder().setCustomId("close_ticket").setLabel("🔒 Close Ticket").setStyle(ButtonStyle.Danger)
     );
 
     await ticketChannel.send({
@@ -154,49 +117,69 @@ client.on("interactionCreate", async (interaction) => {
       components: [closeRow],
     });
 
-    await interaction.reply({ content: "✅ Your ticket has been created.", ephemeral: true });
+    ticketActivity.set(ticketChannel.id, Date.now());
+    return interaction.reply({ content: "✅ Your ticket has been created.", ephemeral: true });
   }
 
   if (customId === "close_ticket") {
-    await interaction.reply("🕐 Closing this ticket in 5 seconds...");
-    setTimeout(() => {
-      interaction.channel.delete().catch(console.error);
-    }, 5000);
+    const confirmRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId("confirm_close").setLabel("✅ Confirm").setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId("cancel_close").setLabel("❌ Cancel").setStyle(ButtonStyle.Secondary)
+    );
+    return interaction.reply({
+      content: "⚠️ Are you sure you want to close this ticket?",
+      components: [confirmRow],
+      ephemeral: true,
+    });
+  }
+
+  if (customId === "confirm_close") {
+    await interaction.channel.send("🔒 Ticket closed. Thank you!");
+    return setTimeout(() => interaction.channel.delete().catch(console.error), 3000);
+  }
+
+  if (customId === "cancel_close") {
+    return interaction.reply({ content: "❎ Ticket closure canceled.", ephemeral: true });
   }
 });
 
 client.on("messageCreate", async (message) => {
-  if (
-    message.author.bot ||
-    !message.guild ||
-    !message.channel.name.startsWith("ticket-")
-  )
-    return;
+  if (message.author.bot || !message.guild || !message.channel.name.startsWith("ticket-")) return;
+  if (message.system || message.type !== 0) return;
 
-  // Track conversation history (limit last 6 messages per user)
-  const userId = message.author.id;
-  const history = conversationHistory.get(userId)?.history || [];
+  ticketActivity.set(message.channel.id, Date.now());
 
+  const history = conversationHistory.get(message.channel.id)?.history || [];
   history.push({ role: "user", content: message.content });
 
-  // Call AI (Groq) API
   const reply = await fetchFromGroq(history);
-
   if (!reply) return;
 
   history.push({ role: "assistant", content: reply });
-  conversationHistory.set(userId, {
+  conversationHistory.set(message.channel.id, {
     history: history.slice(-6),
     timestamp: Date.now(),
   });
 
-  // Send reply chunked to stay within Discord limits
   for (const chunk of splitMessage(reply)) {
     await message.channel.send(chunk);
   }
 });
 
-// Fetch AI response from Groq API
+setInterval(() => {
+  const now = Date.now();
+  for (const [channelId, lastActive] of ticketActivity.entries()) {
+    if (now - lastActive > 12 * 60 * 60 * 1000) { // 12 hours
+      const channel = client.channels.cache.get(channelId);
+      if (channel) {
+        channel.send("⏳ Ticket has been inactive for 12 hours and will now be closed.")
+          .then(() => setTimeout(() => channel.delete().catch(() => {}), 5000));
+      }
+      ticketActivity.delete(channelId);
+    }
+  }
+}, 60 * 60 * 1000); // every hour
+
 async function fetchFromGroq(messages) {
   try {
     const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
@@ -210,15 +193,20 @@ async function fetchFromGroq(messages) {
         messages,
       }),
     });
+
+    if (!response.ok) {
+      console.error("Groq API error:", await response.text());
+      return null;
+    }
+
     const data = await response.json();
     return data.choices?.[0]?.message?.content.trim();
   } catch (err) {
-    console.error("Groq API error:", err);
+    console.error("Fetch failed:", err);
     return "⚠️ Sorry, I am currently unable to respond.";
   }
 }
 
-// Split long messages into 2000-char chunks for Discord
 function splitMessage(text, maxLength = 2000) {
   const chunks = [];
   let current = "";
